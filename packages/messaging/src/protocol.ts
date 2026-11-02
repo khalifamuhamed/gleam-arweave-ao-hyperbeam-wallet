@@ -172,10 +172,11 @@ export interface ProtocolMap {
    * Current spot price in `currency` for every token in `core/pricing`'s
    * `DEFAULT_TOKEN_REGISTRY` (AR, AO) — drives the value line under each
    * `TokenRow` on the Tokens tab. A token whose price couldn't be
-   * computed comes back with `price: null`, never a fabricated `0`. Any
-   * watched token outside the registry has no entry here at all.
+   * computed comes back with `price: null`, never a fabricated `0`. A token
+   * outside the registry has an entry only when named in `processIds` and
+   * priced from its own orderbook; otherwise it has none.
    */
-  getTokenPrices(req: { currency: DisplayCurrency }): TokenPrice[];
+  getTokenPrices(req: { currency: DisplayCurrency; processIds?: string[] }): TokenPrice[];
   getLockSettings(): LockSettings;
   getNetworkSettings(): NetworkSettings;
   /**

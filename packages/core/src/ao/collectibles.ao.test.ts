@@ -83,11 +83,22 @@ function stubFetch(world: World) {
         .filter((id) => world.descriptors[id])
         .map((id) => edge(id, null, world.descriptors[id]!));
     } else {
-      const tagNames = (variables.tags as Array<{ name: string }>).map((t) => t.name);
-      const ids = tagNames.includes("initial-holder") ? world.initial : tagNames.includes("recipient") ? world.received : world.market;
-      edges = (ids ?? []).map((id) =>
-        tagNames.includes("initial-holder") ? edge(id, null, {}) : edge("msg-" + id, id, {}),
-      );
+      const page = (tagFilters: Array<{ name: string }>) => {
+        const tagNames = tagFilters.map((t) => t.name);
+        const ids = tagNames.includes("initial-holder") ? world.initial : tagNames.includes("recipient") ? world.received : world.market;
+        return {
+          pageInfo: { hasNextPage: false },
+          edges: (ids ?? []).map((id) => (tagNames.includes("initial-holder") ? edge(id, null, {}) : edge("msg-" + id, id, {}))),
+        };
+      };
+      // The scans share one aliased query: `s<i>` reads `$t<i>`.
+      return Response.json({
+        data: Object.fromEntries(
+          Object.keys(variables)
+            .filter((key) => key.startsWith("t"))
+            .map((key) => [`s${key.slice(1)}`, page(variables[key])]),
+        ),
+      });
     }
     return Response.json({ data: { transactions: { pageInfo: { hasNextPage: false }, edges } } });
   }) as typeof fetch;
@@ -180,7 +191,7 @@ describe("discoverCollectibles", () => {
       balances: { [A]: 0 },
     });
     await result;
-    expect(calls.filter((u) => u.includes("/graphql")).length).toBe(4); // 3 scans + 1 descriptor batch
+    expect(calls.filter((u) => u.includes("/graphql")).length).toBe(2); // 1 batched scan + 1 descriptor batch
   });
 
   it("throws when no balance can be read, rather than reporting an empty wallet", async () => {

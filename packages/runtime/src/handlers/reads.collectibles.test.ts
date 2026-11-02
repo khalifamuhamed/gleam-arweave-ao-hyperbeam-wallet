@@ -42,10 +42,13 @@ function stubNetwork(failBalance = false) {
       return failBalance ? new Response("x", { status: 500 }) : new Response("1");
     }
     const { query } = JSON.parse(String(init?.body));
-    const node = query.includes("$ids")
-      ? { id: ASSET, tags: nft.map((name, i) => ({ name, value: values[i] })) }
-      : { id: "m", recipient: ASSET, tags: [] };
-    return Response.json({ data: { transactions: { edges: [{ cursor: "c", node }] } } });
+    const edges = (node: object) => ({ edges: [{ cursor: "c", node }] });
+    if (query.includes("$ids")) {
+      return Response.json({ data: { transactions: edges({ id: ASSET, tags: nft.map((name, i) => ({ name, value: values[i] })) }) } });
+    }
+    // Discovery's scans share one aliased query (`s0`, `s1`, `s2`).
+    const scan = edges({ id: "m", recipient: ASSET, tags: [] });
+    return Response.json({ data: { s0: scan, s1: scan, s2: scan } });
   });
   globalThis.fetch = fn as unknown as typeof fetch;
   return fn;

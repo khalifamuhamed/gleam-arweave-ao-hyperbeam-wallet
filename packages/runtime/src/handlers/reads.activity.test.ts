@@ -1077,6 +1077,76 @@ describe("ReadsHandler: display currency", () => {
   });
 });
 
+describe("ReadsHandler: getTokenPrices for orderbook tokens", () => {
+  const LISTED = "L".repeat(43);
+  const NODE = "https://state.forward.computer";
+  const HOUR = 60 * 60 * 1000;
+  const AR = 1_000_000_000_000;
+
+  /** AR is $20; the node serves one token with a 0.5 AR/token ask, or refuses. */
+  function fetchWithNode(nodeStatus = 200) {
+    const order = { "order-id": "A".repeat(43), asking: String(AR), quantity: String(2 * AR), status: "open" };
+    return vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith(NODE)) {
+        if (nodeStatus !== 200) return new Response("denied", { status: nodeStatus });
+        const body = JSON.stringify({ "execution-device": "token@1.0", denomination: 12, orders: { [order["order-id"]]: order } });
+        return new Response(init?.method === "HEAD" ? null : body, { headers: { "codec-device": "json@1.0" } });
+      }
+      if (url.includes("/prices/fx")) return { ok: true, status: 200, json: async () => ({ rate: 0.5 }) };
+      if (url.includes("/prices/history")) return { ok: true, status: 200, json: async () => ({ series: [{ timestamp: 1, usd: 10 }, { timestamp: 2, usd: 10 }] }) };
+      if (url.includes("/prices?ids=arweave")) return { ok: true, status: 200, json: async () => ({ prices: { arweave: 20 } }) };
+      if (url.includes("/prices?ids=ao-computer")) return { ok: true, status: 200, json: async () => ({ prices: { "ao-computer": 5 } }) };
+      throw new Error(`Unexpected fetch url: ${url}`);
+    }) as unknown as typeof fetch;
+  }
+
+  it("prices a listed token from its orderbook at AR's price, in the display currency", async () => {
+    globalThis.fetch = fetchWithNode();
+
+    const prices = await new ReadsHandler(createFakeStorage()).getTokenPrices({ currency: "EUR", processIds: [LISTED] });
+
+    // 0.5 AR x $20 = $10, then EUR at 0.5 per USD.
+    expect(prices.find((entry) => entry.processId === LISTED)).toEqual({ processId: LISTED, price: 5, change24h: null });
+  });
+
+  it("leaves a token the node can't price out of the result", async () => {
+    globalThis.fetch = fetchWithNode(403);
+
+    const prices = await new ReadsHandler(createFakeStorage()).getTokenPrices({ currency: "USD", processIds: [LISTED] });
+
+    expect(prices.map((entry) => entry.processId)).toEqual([null, AO]);
+  });
+
+  it("reports the move since a price sample about a day old", async () => {
+    globalThis.fetch = fetchWithNode();
+    const storage = createFakeStorage();
+    await storage.set("local:priceSnapshots", { [LISTED]: [{ at: Date.now() - 24 * HOUR, usd: 5 }] });
+
+    const prices = await new ReadsHandler(storage).getTokenPrices({ currency: "USD", processIds: [LISTED] });
+
+    expect(prices.find((entry) => entry.processId === LISTED)).toEqual({ processId: LISTED, price: 10, change24h: 1 });
+  });
+
+  it("keeps a sample for tomorrow's comparison", async () => {
+    globalThis.fetch = fetchWithNode();
+    const storage = createFakeStorage();
+
+    await new ReadsHandler(storage).getTokenPrices({ currency: "USD", processIds: [LISTED] });
+
+    expect(await storage.get("local:priceSnapshots")).toEqual({ [LISTED]: [{ at: expect.any(Number), usd: 10 }] });
+  });
+
+  it("never asks the node about registered or malformed ids", async () => {
+    const fetchSpy = fetchWithNode();
+    globalThis.fetch = fetchSpy;
+
+    await new ReadsHandler(createFakeStorage()).getTokenPrices({ currency: "USD", processIds: [AO, "AO", "../x"] });
+
+    expect(vi.mocked(fetchSpy).mock.calls.some(([url]) => String(url).startsWith(NODE))).toBe(false);
+  });
+});
+
 describe("ReadsHandler: promotePendingActivity", () => {
   it("promotes a locally-pending entry to confirmed once the gateway indexes it", async () => {
     const storage = createFakeStorage();

@@ -60,7 +60,7 @@ export async function discoverTokens(options: DiscoverTokensOptions): Promise<To
       deadline: Date.now() + budgetMs,
       describe: (gw, detail) => `Token lookup against "${gw}" failed: ${detail}`,
     });
-  const { scan } = scanner(options.budgetMs ?? DEFAULTS.budgetMs);
+  const { scan, scanMany } = scanner(options.budgetMs ?? DEFAULTS.budgetMs);
 
   const classify = async (ids: string[], legacyIds: ReadonlySet<string>): Promise<TokenMetadata[]> => {
     // Its own budget: a slow Credit-Notice scan (arweave.net can take
@@ -97,17 +97,19 @@ export async function discoverTokens(options: DiscoverTokensOptions): Promise<To
     ),
   ]);
   const l1Settled = await Promise.allSettled([
-    scan(
+    scanMany([
       {
-        tags: [
-          { name: "action", values: ["transfer"] },
-          { name: "recipient", values: [address] },
-        ],
+        filter: {
+          tags: [
+            { name: "action", values: ["transfer"] },
+            { name: "recipient", values: [address] },
+          ],
+        },
+        pick: (node) => node.recipient,
       },
-      (node) => node.recipient,
-    ),
-    scan({ tags: [{ name: "action", values: ["register-interest", "make-offer"] }], owners: [address] }, (node) => node.recipient),
-    scan({ tags: [{ name: "initial-holder", values: [address] }] }),
+      { filter: { tags: [{ name: "action", values: ["register-interest", "make-offer"] }], owners: [address] }, pick: (node) => node.recipient },
+      { filter: { tags: [{ name: "initial-holder", values: [address] }] } },
+    ]).then((lists) => lists.flat()),
   ]);
   const l1Ids = [...new Set(l1Settled.flatMap((result) => (result.status === "fulfilled" ? result.value : [])))];
   if (options.onL1Tokens && l1Ids.length > 0) {

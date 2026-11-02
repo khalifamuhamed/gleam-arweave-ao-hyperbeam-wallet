@@ -16,6 +16,8 @@ interface ConnectionResponse {
   data?: { transactions?: { pageInfo?: { hasNextPage: boolean }; edges: Array<{ cursor: string; node: ScanNode }> } };
 }
 
+type Connection = NonNullable<NonNullable<ConnectionResponse["data"]>["transactions"]>;
+
 export type AssetClass = "unique" | "fungible";
 
 export const PROCESS_ID = /^[A-Za-z0-9_-]{43}$/;
@@ -132,6 +134,63 @@ export function createAssetScanner(options: AssetScannerOptions) {
     return ids;
   };
 
+  /**
+   * Pages several tag scans in one aliased query per round, so N sources
+   * cost one request per page instead of N. The public gateways rate-limit
+   * (HTTP 429) on request count, and a failed round loses every source
+   * anyway, so batching only removes calls. Sources that run out of pages
+   * drop out of later rounds. Results come back in `sources` order.
+   */
+  const scanMany = async (
+    sources: Array<{ filter: Omit<ScanFilter, "recipients">; pick?: (node: ScanNode) => string | null | undefined }>,
+  ): Promise<string[][]> => {
+    const ids: string[][] = sources.map(() => []);
+    const cursors: Array<string | undefined> = sources.map(() => undefined);
+    let active = sources.map((_, index) => index);
+    for (let page = 0; page < maxPages && active.length > 0 && Date.now() < deadline; page++) {
+      const declarations = active.map((i) => `$a${i}: String, $o${i}: [String!], $t${i}: [TagFilter!]!`).join(", ");
+      const fields = active
+        .map(
+          (i) => `s${i}: transactions(first: ${SCAN_PAGE_SIZE}, after: $a${i}, sort: HEIGHT_DESC, owners: $o${i}, tags: $t${i}) {
+    pageInfo { hasNextPage }
+    edges { cursor node { id recipient tags { name value } } }
+  }`,
+        )
+        .join("\n  ");
+      const variables: Record<string, unknown> = {};
+      for (const i of active) {
+        variables[`a${i}`] = cursors[i];
+        variables[`o${i}`] = sources[i]?.filter.owners;
+        variables[`t${i}`] = sources[i]?.filter.tags;
+      }
+      const data = (
+        await postGraphQLWithFailover<{ data?: Record<string, Connection | undefined> }>(
+          gatewayUrl,
+          `query (${declarations}) {\n  ${fields}\n}`,
+          variables,
+          fetchImpl,
+          describe,
+        )
+      ).data;
+      const next: number[] = [];
+      for (const i of active) {
+        const connection = data?.[`s${i}`];
+        const edges = connection?.edges ?? [];
+        const pick = sources[i]?.pick;
+        for (const { node } of edges) {
+          const id = pick ? pick(node) : node.id;
+          if (id && PROCESS_ID.test(id)) ids[i]?.push(id);
+        }
+        if (connection?.pageInfo?.hasNextPage && edges.length > 0) {
+          cursors[i] = edges[edges.length - 1]?.cursor;
+          next.push(i);
+        }
+      }
+      active = next;
+    }
+    return ids;
+  };
+
   const fetchTags = async (ids: string[]): Promise<Map<string, Tag[]>> => {
     const batches: string[][] = [];
     for (let i = 0; i < ids.length; i += SCAN_PAGE_SIZE) batches.push(ids.slice(i, i + SCAN_PAGE_SIZE));
@@ -151,7 +210,7 @@ export function createAssetScanner(options: AssetScannerOptions) {
     return found;
   };
 
-  return { scan, fetchTags };
+  return { scan, scanMany, fetchTags };
 }
 
 /** A fetch that gives every request its own timeout, so one hung host can't hold a scan past its budget. */

@@ -43,7 +43,7 @@ describe("GatedOnboarding", () => {
     expect(screen.queryByRole("link", { name: "Ask for an invite on X" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Get an invitation" }));
     expect(screen.getByRole("link", { name: "Ask for an invite on X" }).getAttribute("href")).toBe(
-      "https://x.com/intent/post?text=%40gleam_wallet%20",
+      "https://x.com/intent/post?text=%40gleam_wallet%20%23GleamInvite%20",
     );
     expect(screen.getByRole("link", { name: "follow @gleam_wallet for drops" }).getAttribute("href")).toBe(
       "https://x.com/gleam_wallet",

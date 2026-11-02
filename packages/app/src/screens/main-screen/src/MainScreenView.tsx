@@ -32,7 +32,7 @@ import { useBalances, type WalletBalances } from "../../activity/src/useBalances
 import { walletQueryKeys } from "../../activity/src/queryKeys";
 import { usePortfolioHistory } from "./usePortfolioHistory";
 import { useOtherWallets } from "../../activity/src/useOtherWallets";
-import { useTokenPrices } from "./useTokenPrices";
+import { useOrderbookPrices, useTokenPrices } from "./useTokenPrices";
 import { MainScreenNotice } from "./MainScreenNotice";
 import { SiteWalletCard, type SiteWalletCardProps } from "../../site-wallet/index.tsx";
 import { PointsTokenRow } from "../../points/index.tsx";
@@ -263,12 +263,38 @@ function buildDefaultTokenRows(
 /**
  * The non-default watched tokens rendered below the AR/AO rows — every
  * `TokenBalance` whose `processId` isn't the AO default. These have no
- * entry in `DEFAULT_TOKEN_REGISTRY`, so `valueFor` always
- * resolves `undefined` for them today — no value line until such a token
- * gets a confirmed price-source mapping.
+ * entry in `DEFAULT_TOKEN_REGISTRY`, so they carry a price only when
+ * `useOrderbookPrices` found one; otherwise `valueFor` resolves
+ * `undefined` and the row shows no value line.
  */
 function nonDefaultTokenBalances(data: WalletBalances | undefined): TokenBalance[] {
   return (data?.tokenBalances ?? []).filter((token) => token.processId !== DEFAULT_AO_TOKEN.processId);
+}
+
+/**
+ * The tokens worth asking an orderbook about: ones the user added, whose
+ * balance resolved. A discovered token's name and logo are the sender's
+ * claim, so its price would be too.
+ */
+function pricedTokenIds(data: WalletBalances | undefined): string[] {
+  return nonDefaultTokenBalances(data)
+    .filter((token) => token.source !== "discovered" && token.available !== false)
+    .map((token) => token.processId)
+    .sort();
+}
+
+/**
+ * What the priced orderbook tokens are worth now. The chart's history only
+ * covers AR and AO, so without this the total reads lower than the rows
+ * under it.
+ */
+function orderbookHoldingsValue(data: WalletBalances | undefined, prices: TokenPrice[] | undefined, currency: DisplayCurrency | undefined): number {
+  return nonDefaultTokenBalances(data)
+    .filter((token) => token.source !== "discovered" && token.available !== false)
+    .reduce((sum, token) => {
+      const amount = Number(formatAtomicAsDisplay(token.quantity, token.denomination, token.denomination));
+      return sum + (valueFor(prices, currency, token.processId, amount)?.number ?? 0);
+    }, 0);
 }
 
 /**
@@ -435,6 +461,8 @@ export function MainScreenView({
   const watchOnly = isWatchWalletMethod(wallet.method);
   const toggleMasked = () => void updateDisplaySettings({ balancesHidden: !masked });
   const tokenPricesQuery = useTokenPrices(runtime, currency);
+  const orderbookPricesQuery = useOrderbookPrices(runtime, currency, pricedTokenIds(balancesQuery.data));
+  const tokenPrices = tokenPricesQuery.data ? [...tokenPricesQuery.data, ...(orderbookPricesQuery.data ?? [])] : undefined;
   const hasLoadedOnce = balancesQuery.isSuccess || activityQuery.isSuccess;
   const loading = balancesQuery.isLoading || activityQuery.isLoading;
   const loadError = balancesQuery.error ?? activityQuery.error ?? null;
@@ -478,7 +506,7 @@ export function MainScreenView({
       ]),
   });
 
-  const defaultTokenRows = buildDefaultTokenRows(balancesQuery.data, tokenPricesQuery.data, currency);
+  const defaultTokenRows = buildDefaultTokenRows(balancesQuery.data, tokenPrices, currency);
   const tokensCached = restoredCache(balancesQuery, openedAt) || restoredCache(tokenPricesQuery, openedAt);
   const collectiblesCached = restoredCache(collectiblesQuery, openedAt);
   const activityCached = restoredCache(activityQuery, openedAt);
@@ -487,6 +515,17 @@ export function MainScreenView({
   const chartFetching = tokensFetching || portfolioHistoryQuery.isFetching;
   const chartCached = tokensCached || restoredCache(portfolioHistoryQuery, openedAt);
   const portfolioHasSeries = (portfolioHistoryQuery.data?.series.length ?? 0) > 0;
+  // Only the open wallet's tokens are known here, so the all-wallets total is left as the chart has it.
+  const history = portfolioHistoryQuery.data;
+  const extraValue =
+    portfolioScope === "wallet" && history !== undefined && history.series.length > 0
+      ? orderbookHoldingsValue(balancesQuery.data, tokenPrices, currency)
+      : 0;
+  const chartSeries =
+    history && extraValue > 0 ? history.series.map((point) => ({ ...point, value: point.value + extraValue })) : (history?.series ?? []);
+  const chartFirst = chartSeries[0]?.value ?? 0;
+  const chartLast = chartSeries[chartSeries.length - 1]?.value ?? 0;
+  const chartChange = !history ? 0 : extraValue > 0 && chartSeries.length > 1 && chartFirst > 0 ? chartLast / chartFirst - 1 : history.change;
   const headlineRow =
     displaySettings?.headline === "AR" ? defaultTokenRows[0] : displaySettings?.headline === "AO" ? defaultTokenRows[1] : undefined;
 
@@ -703,10 +742,10 @@ export function MainScreenView({
         <div inert={headerCollapsed}>
           <div className="px-6 pt-0.5 phone:px-5 phone:pb-1 phone:pt-1">
             <PortfolioChart
-              points={portfolioHistoryQuery.data?.series ?? []}
-              currentValue={portfolioHistoryQuery.data?.currentValue ?? 0}
+              points={chartSeries}
+              currentValue={history ? history.currentValue + extraValue : 0}
               currency={currency ?? "USD"}
-              change={portfolioHistoryQuery.data?.change ?? 0}
+              change={chartChange}
               periodLabel={portfolioHistoryQuery.data?.periodLabel ?? ""}
               activeRange={selectedRange}
               onRangeChange={setSelectedRange}
@@ -875,6 +914,9 @@ export function MainScreenView({
                   },
                   ...nonDefaultTokenBalances(balancesQuery.data).map((token) => {
                     const discovered = token.source === "discovered";
+                    const amountNumber =
+                      token.available === false ? 0 : Number(formatAtomicAsDisplay(token.quantity, token.denomination, token.denomination));
+                    const value = discovered || token.available === false ? undefined : valueFor(tokenPrices, currency, token.processId, amountNumber);
                     return {
                       key: token.processId,
                       label: displayTicker(token.ticker),
@@ -897,6 +939,9 @@ export function MainScreenView({
                                   pendingNote(token.pending, token.denomination, masked),
                                 )
                           }
+                          value={value === undefined ? undefined : masked ? HIDDEN_AMOUNT : value.text}
+                          unitPrice={masked || value === undefined ? undefined : unitPriceFor(tokenPrices, currency, token.processId, token.ticker, amountNumber)}
+                          change={value === undefined ? undefined : changeFor(tokenPrices, token.processId)}
                           loading={loading}
                           cached={tokensCached}
                           cachedFetching={tokensFetching}

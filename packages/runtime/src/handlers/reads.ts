@@ -27,7 +27,12 @@ import {
   getHistoricalUsdPrices,
   getUsdFxRate,
   getUsdPrice,
+  changeSinceYesterday,
   impersonatesRegisteredToken,
+  isRegisteredProcessId,
+  parsePriceSnapshots,
+  readBestAsk,
+  recordPriceSample,
   type HistoricalPricePoint,
 } from "@gleam/core/src/pricing/index.ts";
 import { DEFAULT_HYPERBEAM_PEER_URLS, L1_TOKEN_NODE_URLS, POINTS_API_URL, isFiatCurrency } from "@gleam/core";
@@ -98,6 +103,9 @@ import type {
  *   `readTokenBalance`).
  */
 const NETWORK_SETTINGS_KEY = "local:networkSettings";
+const PRICE_SNAPSHOTS_KEY = "local:priceSnapshots";
+/** More than a wallet lists is not a real request, and each id costs the node several reads. */
+const MAX_PRICED_PROCESS_IDS = 50;
 const ACTIVITY_LOG_KEY_PREFIX = "local:activityLog:";
 const WATCHED_PROCESS_IDS_KEY_PREFIX = "local:watchedProcessIds:";
 const TOKEN_METADATA_KEY_PREFIX = "local:tokenMetadata:";
@@ -1158,15 +1166,19 @@ export class ReadsHandler {
    * `DEFAULT_TOKEN_REGISTRY` (`ProtocolMap.getTokenPrices`) — drives each
    * `TokenRow`'s value line. A token whose price sources fail, or any
    * token when the currency itself can't be priced, comes back with
-   * `price: null` (never a fabricated `0`); a token with no `priceSource`
-   * at all (nothing outside the registry today) is skipped entirely
-   * rather than returning a meaningless entry.
+   * `price: null` (never a fabricated `0`).
+   *
+   * `processIds` adds tokens outside the registry, each priced from its own
+   * orderbook (`readBestAsk`) at AR's price. Only an exact process id is
+   * priced, never a ticker. One the node can't price is left out of the
+   * result, not returned as `null`, so the caller shows no price for it.
    *
    * `change24h` comes from the same 24H series the chart uses. A fiat
    * display currency is treated as flat over the day; in AR or AO the move
    * is relative to that token, and the token itself has no move to show.
+   * An orderbook token's move is against the device's own price samples.
    */
-  async getTokenPrices(req: { currency?: DisplayCurrency } = {}): Promise<TokenPrice[]> {
+  async getTokenPrices(req: { currency?: DisplayCurrency; processIds?: string[] } = {}): Promise<TokenPrice[]> {
     const currency = req.currency ?? "USD";
     const priced = DEFAULT_TOKEN_REGISTRY.filter((token) => token.priceSource !== null);
     const [usdPrices, rate] = await Promise.all([
@@ -1189,11 +1201,50 @@ export class ReadsHandler {
 
     const unitChange = isFiatCurrency(currency) ? 0 : (usdPrices.find(({ token }) => token.ticker === currency)?.change ?? null);
 
-    return usdPrices.map(({ token, usd, change }) => ({
+    const registered = usdPrices.map(({ token, usd, change }) => ({
       processId: token.processId,
       price: usd === null || unitUsd === null || unitUsd <= 0 ? null : usd / unitUsd,
       change24h: change === null || unitChange === null || token.ticker === currency ? null : (1 + change) / (1 + unitChange) - 1,
     }));
+
+    const arUsd = usdPrices.find(({ token }) => token.processId === null)?.usd ?? null;
+    if (arUsd === null || unitUsd === null || unitUsd <= 0) return registered;
+
+    const orderbook = await this.getOrderbookPrices(req.processIds ?? [], arUsd);
+    return [
+      ...registered,
+      ...orderbook.map(({ processId, usd, change }) => ({
+        processId,
+        price: usd / unitUsd,
+        change24h: change === null || unitChange === null ? null : (1 + change) / (1 + unitChange) - 1,
+      })),
+    ];
+  }
+
+  /** USD price and 24h move of each token the node can price from its orderbook; the rest are absent. */
+  private async getOrderbookPrices(
+    requested: readonly string[],
+    arUsd: number,
+  ): Promise<{ processId: string; usd: number; change: number | null }[]> {
+    const processIds = [...new Set(requested)]
+      .filter((id) => PROCESS_ID.test(id) && !isRegisteredProcessId(id))
+      .slice(0, MAX_PRICED_PROCESS_IDS);
+    const nodeUrl = (await this.loadNetworkSettings()).activePeerUrl;
+    if (processIds.length === 0 || nodeUrl === null) return [];
+
+    const asks = await Promise.all(processIds.map(async (processId) => ({ processId, ask: await readBestAsk(processId, nodeUrl) })));
+    const now = Date.now();
+    const snapshots = parsePriceSnapshots(await this.storage.get<unknown>(PRICE_SNAPSHOTS_KEY));
+    const prices = asks.flatMap(({ processId, ask }) => {
+      if (ask === null) return [];
+      const usd = ask.arPerToken * arUsd;
+      if (!Number.isFinite(usd) || usd <= 0) return [];
+      const samples = snapshots[processId] ?? [];
+      snapshots[processId] = recordPriceSample(samples, usd, now);
+      return [{ processId, usd, change: changeSinceYesterday(samples, usd, now) }];
+    });
+    if (prices.length > 0) await this.storage.set(PRICE_SNAPSHOTS_KEY, snapshots);
+    return prices;
   }
 }
 

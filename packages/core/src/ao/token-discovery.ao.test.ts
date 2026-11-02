@@ -30,10 +30,24 @@ function gateway(): typeof fetch {
         edge({ id: "n1", recipient: WALLET, owner: { address: AO_MU_SIGNERS[1] }, tags: tags({ "From-Process": LEGACY }) }),
         edge({ id: "n2", recipient: WALLET, owner: { address: "Z".repeat(43) }, tags: tags({ "From-Process": FORGED }) }),
       ];
-    } else if (JSON.stringify(variables.tags).includes("recipient")) {
-      edges = [edge({ id: "t1", recipient: NFT, tags: [] }), edge({ id: "t2", recipient: "hmW7EXCHRzfC6YAE8FKInptdS8-6BOl3fxjZfxmAOpY", tags: [] })];
-    } else if (JSON.stringify(variables.tags).includes("register-interest")) {
-      edges = [edge({ id: "m1", recipient: FODDER, tags: [] })];
+    } else if (!variables.tags) {
+      // The L1 scans share one aliased query: `s<i>` reads `$t<i>`.
+      const page = (filters: unknown) => {
+        const text = JSON.stringify(filters);
+        const list = text.includes("recipient")
+          ? [edge({ id: "t1", recipient: NFT, tags: [] }), edge({ id: "t2", recipient: "hmW7EXCHRzfC6YAE8FKInptdS8-6BOl3fxjZfxmAOpY", tags: [] })]
+          : text.includes("register-interest")
+            ? [edge({ id: "m1", recipient: FODDER, tags: [] })]
+            : [];
+        return { pageInfo: { hasNextPage: false }, edges: list };
+      };
+      return Response.json({
+        data: Object.fromEntries(
+          Object.keys(variables)
+            .filter((key) => key.startsWith("t"))
+            .map((key) => [`s${key.slice(1)}`, page(variables[key])]),
+        ),
+      });
     }
     return Response.json({ data: { transactions: { pageInfo: { hasNextPage: false }, edges } } });
   }) as typeof fetch;

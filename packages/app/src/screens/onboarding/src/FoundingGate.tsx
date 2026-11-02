@@ -10,9 +10,11 @@ import { usePlatform } from "../../../app-platform/context";
 import { sitePageUrl } from "@gleam/core";
 
 const X_PROFILE_URL = "https://x.com/gleam_wallet";
-// Only the mention, so every ask is in the asker's own words and lands in
-// @gleam_wallet's mentions, where members with a spare seat can find it.
-const X_ASK_URL = "https://x.com/intent/post?text=%40gleam_wallet%20";
+// Only the mention and the tag, so every ask is in the asker's own words and
+// lands in @gleam_wallet's mentions and #GleamInvite, where members with a
+// spare seat can find it. The tag alone says what the post wants if they add
+// nothing. No sentence: identical posts from many accounts read as spam.
+const X_ASK_URL = "https://x.com/intent/post?text=%40gleam_wallet%20%23GleamInvite%20";
 
 const MESSAGES: Record<Exclude<InviteRedeemResult, "ok">, string> = {
   full: "That code is full. Its seats have all been taken.",

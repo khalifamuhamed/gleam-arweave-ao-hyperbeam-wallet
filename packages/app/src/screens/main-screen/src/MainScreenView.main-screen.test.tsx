@@ -767,6 +767,39 @@ describe("MainScreenView default AR/AO token rows (DEFAULT-TOKEN-LIST-WALLET-COR
     expect(screen.getAllByText("PNTS").length).toBeGreaterThan(0);
   });
 
+  it("prices a watched token from its orderbook and shows nothing for one without a price", async () => {
+    const watched = (processId: string, ticker: string): TokenBalance => ({
+      address: WALLET.address,
+      processId,
+      ticker,
+      denomination: 0,
+      name: null,
+      quantity: "500",
+      source: "watched",
+    });
+    const PRICED = "P".repeat(43);
+    const UNPRICED = "U".repeat(43);
+    const base = sendWith({ tokenBalances: [watched(PRICED, "LST"), watched(UNPRICED, "NOPE")] });
+    const send = vi.fn(async (message: { type: string; payload?: { processIds?: string[] } }) => {
+      if (message.type !== "getTokenPrices") return base(message as never);
+      return message.payload?.processIds
+        ? [{ processId: PRICED, price: 2, change24h: 0.1 }]
+        : [{ processId: null, price: 3, change24h: null }];
+    }) as unknown as RuntimePort["send"];
+    renderMainScreen({ runtime: fakeRuntime({ send }) });
+
+    await waitFor(() => expect(screen.getByText("+10.00%")).toBeTruthy());
+    expect(screen.getByText("$1,000.00")).toBeTruthy();
+    expect(screen.getByText(/@ \$2\.00/)).toBeTruthy();
+    expect(screen.getByText("NOPE")).toBeTruthy();
+    // AR and the priced token only: the unpriced row shows its amount and nothing else.
+    expect(screen.getAllByText(/@ \$/)).toHaveLength(2);
+    expect(send).toHaveBeenCalledWith({ type: "getTokenPrices", payload: { currency: "USD", processIds: [PRICED, UNPRICED].sort() } });
+    // The priced token's $1,000 joins the chart's total, so it matches the rows.
+    const total = screen.getByRole("button", { name: "Hide balances" }).textContent;
+    expect(total).toBe(new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(PORTFOLIO_HISTORY_7D.currentValue + 1000));
+  });
+
   it("opens an AR send when the AR default row is clicked", async () => {
     const onSend = vi.fn();
     const onSendToken = vi.fn();

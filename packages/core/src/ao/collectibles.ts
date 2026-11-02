@@ -48,7 +48,7 @@ export async function discoverCollectibles(options: DiscoverCollectiblesOptions)
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
   const deadline = Date.now() + (options.budgetMs ?? DEFAULTS.budgetMs);
   const fetchImpl = withRequestTimeout(options.fetchImpl ?? fetch);
-  const { scan, fetchTags } = createAssetScanner({
+  const { scanMany, fetchTags } = createAssetScanner({
     gatewayUrl,
     fetchImpl,
     maxPages,
@@ -57,18 +57,18 @@ export async function discoverCollectibles(options: DiscoverCollectiblesOptions)
     describe: (gw, detail) => `Collectible lookup against "${gw}" failed: ${detail}`,
   });
 
-  const [initial, market, received] = await Promise.all([
-    scan({ tags: [{ name: "initial-holder", values: [address] }] }),
-    scan({ tags: [{ name: "action", values: ["register-interest", "make-offer"] }], owners: [address] }, (node) => node.recipient),
-    scan(
-      {
+  const [initial = [], market = [], received = []] = await scanMany([
+    { filter: { tags: [{ name: "initial-holder", values: [address] }] } },
+    { filter: { tags: [{ name: "action", values: ["register-interest", "make-offer"] }], owners: [address] }, pick: (node) => node.recipient },
+    {
+      filter: {
         tags: [
           { name: "action", values: ["transfer"] },
           { name: "recipient", values: [address] },
         ],
       },
-      (node) => node.recipient,
-    ),
+      pick: (node) => node.recipient,
+    },
   ]);
   const candidates = [...new Set([...initial, ...market, ...received])].slice(0, maxCandidates);
 
