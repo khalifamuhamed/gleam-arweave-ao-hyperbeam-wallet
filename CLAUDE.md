@@ -85,10 +85,13 @@ primitives, `@tanstack/react-query`, `@webext-core/messaging`, Vitest
   of each method's caller tier, whether it can open an approval, and the
   zod schema its page-supplied params are parsed with; the background
   dispatcher enforces it before any handler runs.
-- **Signing keys** are decrypted on unlock and held in
-  `chrome.storage.session` through `handlers/key-session.ts`, keyed by
-  wallet id. Handlers get the key from there. Never re-derive it from a
-  password.
+- **Signing keys** are decrypted on unlock and imported, by wallet id,
+  as non-extractable WebCrypto keys into the keyring offscreen document
+  (`entrypoints/keyring/`), which holds them in memory only.
+  `chrome.storage.session` holds only each unlocked wallet's address and
+  public key. Handlers get a signer through `handlers/key-session.ts`
+  (`getSigner`). Never write key material to `chrome.storage` or
+  IndexedDB, and never re-derive it from a password.
 - **Passkey unlock** wraps the vault password under the passkey's
   WebAuthn PRF output (`core/vault/passkey.ts`, `handlers/passkey.ts`),
   so it unlocks exactly like the password. The RP id is the extension
